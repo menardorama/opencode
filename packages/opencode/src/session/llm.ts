@@ -26,6 +26,94 @@ import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
 
 const log = Log.create({ service: "llm" })
+
+function isJsonStringEscaped(str: string, pos: number): boolean {
+  let count = 0
+  for (let i = pos - 1; i >= 0; i--) {
+    if (str[i] === "\\") count++
+    else break
+  }
+  return count % 2 === 1
+}
+
+function repairTruncatedJson(input: string): string | undefined {
+  let repaired = input.trim()
+  if (!repaired.startsWith("{")) return undefined
+
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      JSON.parse(repaired)
+      return repaired
+    } catch {
+      let inString = false
+      for (let i = 0; i < repaired.length; i++) {
+        if (repaired[i] === '"' && !isJsonStringEscaped(repaired, i)) {
+          inString = !inString
+        }
+      }
+
+      if (inString) {
+        if (repaired[repaired.length - 1] === "\\") {
+          repaired = repaired.slice(0, -1)
+        }
+        repaired += '"'
+        continue
+      }
+
+      let openBraces = 0
+      let openBrackets = 0
+      inString = false
+      for (let i = 0; i < repaired.length; i++) {
+        if (repaired[i] === '"' && !isJsonStringEscaped(repaired, i)) {
+          inString = !inString
+          continue
+        }
+        if (!inString) {
+          if (repaired[i] === "{") openBraces++
+          if (repaired[i] === "}") openBraces--
+          if (repaired[i] === "[") openBrackets++
+          if (repaired[i] === "]") openBrackets--
+        }
+      }
+
+      if (openBrackets > 0) {
+        repaired += "]"
+        continue
+      }
+      if (openBraces > 0) {
+        repaired += "}"
+        continue
+      }
+
+      const lastChar = repaired[repaired.length - 1]
+      if (lastChar === ",") {
+        repaired = repaired.slice(0, -1)
+        continue
+      }
+
+      let lastComma = -1
+      inString = false
+      for (let i = 0; i < repaired.length; i++) {
+        if (repaired[i] === '"' && !isJsonStringEscaped(repaired, i)) {
+          inString = !inString
+          continue
+        }
+        if (!inString && repaired[i] === ",") {
+          lastComma = i
+        }
+      }
+      if (lastComma > 0) {
+        repaired = repaired.slice(0, lastComma)
+        continue
+      }
+
+      break
+    }
+  }
+
+  return undefined
+}
+
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 type Result = Awaited<ReturnType<typeof streamText>>
 
@@ -348,6 +436,23 @@ const live: Layer.Layer<
               toolName: lower,
             }
           }
+
+          const toolInput = failed.toolCall.input
+          if (typeof toolInput === "string" && toolInput.trim().startsWith("{")) {
+            const repaired = repairTruncatedJson(toolInput)
+            if (repaired) {
+              l.info("repaired truncated tool call json", {
+                tool: failed.toolCall.toolName,
+                original: toolInput,
+                repaired,
+              })
+              return {
+                ...failed.toolCall,
+                input: repaired,
+              }
+            }
+          }
+
           return {
             ...failed.toolCall,
             input: JSON.stringify({
