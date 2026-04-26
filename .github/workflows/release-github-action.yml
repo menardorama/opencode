@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - dev
+      - test
     paths:
       - "github/**"
 
@@ -14,7 +15,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    #runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
         with:
